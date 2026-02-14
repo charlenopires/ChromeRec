@@ -56,7 +56,7 @@ async function ensureOffscreenDocument(): Promise<void> {
       chrome.offscreen.Reason.USER_MEDIA,
       chrome.offscreen.Reason.BLOBS,
     ],
-    justification: "MediaRecorder for tab capture",
+    justification: "Video encoding for tab capture",
   });
 }
 
@@ -132,6 +132,7 @@ async function startRecording(config: RecordingConfig): Promise<AckResponse> {
       type: MessageType.STREAM_ID_READY,
       streamId,
       config,
+      tabTitle: tab.title ?? "untitled",
     } satisfies ExtensionMessage);
 
     // 5. Persist state
@@ -227,9 +228,8 @@ chrome.runtime.onMessage.addListener(
 
       case MessageType.RECORDING_STOPPED: {
         console.log(
-          "[sw] Recording stopped:",
-          msg.chunks.length,
-          "chunks,",
+          "[sw] Recording stopped: id=",
+          msg.recordingId,
           msg.durationMs,
           "ms",
         );

@@ -54,6 +54,7 @@ export interface StreamIdReadyMessage {
   readonly type: typeof MessageType.STREAM_ID_READY;
   readonly streamId: string;
   readonly config: RecordingConfig;
+  readonly tabTitle?: string;
 }
 
 export interface RecordingStartedMessage {
@@ -63,7 +64,7 @@ export interface RecordingStartedMessage {
 
 export interface RecordingStoppedMessage {
   readonly type: typeof MessageType.RECORDING_STOPPED;
-  readonly chunks: ArrayBuffer[];
+  readonly recordingId: number;
   readonly mimeType: string;
   readonly durationMs: number;
 }

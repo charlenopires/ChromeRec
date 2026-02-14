@@ -35,6 +35,11 @@ describe("sanitizeTitle", () => {
 describe("generateFilename", () => {
   const date = new Date("2025-02-14T12:30:00Z");
 
+  test("produces .mov for QuickTime mime type", () => {
+    const result = generateFilename("My Page", "video/quicktime", date);
+    expect(result).toBe("chromerec-my-page-2025-02-14T12-30-00.mov");
+  });
+
   test("produces .mp4 for MP4 mime type", () => {
     const result = generateFilename("My Page", "video/mp4;codecs=avc1,mp4a.40.2", date);
     expect(result).toBe("chromerec-my-page-2025-02-14T12-30-00.mp4");

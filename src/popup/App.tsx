@@ -7,14 +7,12 @@ import {
   type StatusResponse,
 } from "@/types/messages";
 import {
-  saveRecording,
   getRecording,
   listRecordings,
   deleteRecording,
   getStorageEstimate,
   type RecordingMeta,
 } from "@/lib/db";
-import { generateFilename } from "@/lib/filename";
 import { formatDuration, formatSize, formatDate } from "@/lib/format";
 
 // --- State machine ---
@@ -438,50 +436,17 @@ export default function App() {
           break;
 
         case MessageType.RECORDING_STOPPED: {
-          const { chunks, mimeType, durationMs } = message;
-          const blob = new Blob(chunks, { type: mimeType });
-          console.log(`[popup] Recording stopped: ${blob.size} bytes, ${durationMs}ms, ${mimeType}`);
+          const { recordingId, durationMs } = message;
+          console.log(`[popup] Recording stopped: id=${recordingId}, ${durationMs}ms`);
 
-          if (blob.size === 0) {
-            setState((prev) => ({
-              ...prev,
-              phase: "error",
-              errorMessage: "Recording produced no data",
-            }));
-            break;
-          }
-
-          // MP4 from offscreen WebCodecs pipeline — save directly
-          chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-            const tabTitle = tabs[0]?.title ?? "untitled";
-            const filename = generateFilename(tabTitle, mimeType);
-
-            saveRecording({
-              filename,
-              mimeType,
-              size: blob.size,
-              durationMs,
-              createdAt: Date.now(),
-              tabTitle,
-              blob,
-            }).then((id) => {
-              console.log(`[popup] Saved recording id=${id}, file=${filename}`);
-              setState((prev) => ({
-                ...prev,
-                phase: "completed",
-                lastSavedId: id,
-                durationMs,
-              }));
-              refreshData();
-            }).catch((err) => {
-              console.error("[popup] Failed to save recording:", err);
-              setState((prev) => ({
-                ...prev,
-                phase: "error",
-                errorMessage: "Failed to save recording",
-              }));
-            });
-          });
+          // Recording already saved to IndexedDB by offscreen document
+          setState((prev) => ({
+            ...prev,
+            phase: "completed",
+            lastSavedId: recordingId,
+            durationMs,
+          }));
+          refreshData();
           break;
         }
 

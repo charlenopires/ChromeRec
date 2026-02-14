@@ -1,6 +1,8 @@
-// Offscreen document: captures tab via getUserMedia, encodes to H.264/AAC,
-// and muxes to proper MP4 using mediabunny's MediaStream sources.
-// Follows the official mediabunny live-recording example pattern.
+// Offscreen document: captures tab video via getUserMedia, encodes to H.264,
+// and muxes to QuickTime MOV using mediabunny's MediaStreamVideoTrackSource.
+// Saves the recording directly to IndexedDB (shared with popup) to avoid
+// ArrayBuffer serialization issues with Chrome extension messaging.
+// Video only — no audio capture.
 
 import {
   MessageType,
@@ -8,34 +10,29 @@ import {
   type ExtensionMessage,
   type RecordingConfig,
 } from "@/types/messages";
+import { saveRecording } from "@/lib/db";
 import {
   Output,
-  Mp4OutputFormat,
+  MovOutputFormat,
   BufferTarget,
   MediaStreamVideoTrackSource,
-  MediaStreamAudioTrackSource,
   canEncodeVideo,
-  canEncodeAudio,
 } from "mediabunny";
 
 // --- State ---
 
 let mediaStream: MediaStream | null = null;
-let output: Output<Mp4OutputFormat, BufferTarget> | null = null;
+let output: Output<MovOutputFormat, BufferTarget> | null = null;
 let bufferTarget: BufferTarget | null = null;
 let startedAt = 0;
 let stopping = false;
+let tabTitle = "untitled";
 
 // --- Stream acquisition ---
 
 async function acquireStream(streamId: string): Promise<MediaStream> {
   return navigator.mediaDevices.getUserMedia({
-    audio: {
-      mandatory: {
-        chromeMediaSource: "tab",
-        chromeMediaSourceId: streamId,
-      },
-    } as MediaTrackConstraints,
+    audio: false,
     video: {
       mandatory: {
         chromeMediaSource: "tab",
@@ -52,19 +49,22 @@ async function startRecording(
   config: RecordingConfig,
 ): Promise<void> {
   try {
+    if (typeof VideoEncoder === "undefined") {
+      throw new Error("WebCodecs VideoEncoder not available in offscreen document");
+    }
+
     const stream = await acquireStream(streamId);
     mediaStream = stream;
     stopping = false;
 
     const videoTrack = stream.getVideoTracks()[0];
-    const audioTrack = stream.getAudioTracks()[0];
     if (!videoTrack) throw new Error("No video track available");
 
     const vs = videoTrack.getSettings();
     const width = vs.width ?? 1920;
     const height = vs.height ?? 1080;
 
-    // Check codec support before creating sources
+    // Check H.264 encoder support
     const videoOk = await canEncodeVideo("avc", {
       width,
       height,
@@ -72,16 +72,12 @@ async function startRecording(
     });
     if (!videoOk) throw new Error("H.264 video encoding not supported");
 
-    const audioOk = audioTrack
-      ? await canEncodeAudio("aac", { bitrate: 128_000 })
-      : false;
+    console.log(`[offscreen] H.264 avc supported, ${width}x${height}, ${config.videoBitsPerSecond / 1_000_000} Mbps`);
 
-    console.log(`[offscreen] Codec support: video=avc(${videoOk}), audio=aac(${audioOk})`);
-
-    // Setup muxer — moov at start for QuickTime compatibility
+    // Setup muxer — MOV format (QuickTime native) with moov at start
     bufferTarget = new BufferTarget();
     output = new Output({
-      format: new Mp4OutputFormat({ fastStart: "in-memory" }),
+      format: new MovOutputFormat({ fastStart: "in-memory" }),
       target: bufferTarget,
     });
 
@@ -95,20 +91,6 @@ async function startRecording(
     });
     output.addVideoTrack(videoSource, { frameRate: config.fps });
 
-    // Audio source (AAC if supported, opus as fallback)
-    if (audioTrack) {
-      const audioCodec = audioOk ? "aac" : "opus";
-      const audioSource = new MediaStreamAudioTrackSource(
-        audioTrack as MediaStreamAudioTrack,
-        { codec: audioCodec, bitrate: 128_000 },
-      );
-      audioSource.errorPromise.catch((err) => {
-        console.error("[offscreen] Audio source error:", err);
-      });
-      output.addAudioTrack(audioSource);
-      console.log(`[offscreen] Audio codec: ${audioCodec}`);
-    }
-
     // Start — frames are captured automatically
     await output.start();
 
@@ -119,9 +101,7 @@ async function startRecording(
       startedAt,
     } satisfies ExtensionMessage).catch(console.error);
 
-    console.log(
-      `[offscreen] Recording started: H.264/${audioOk ? "AAC" : "Opus"}, ${width}x${height}, ${config.videoBitsPerSecond / 1_000_000} Mbps`,
-    );
+    console.log(`[offscreen] Recording started: H.264 MOV, ${width}x${height}`);
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unknown error";
     console.error("[offscreen] Start error:", err);
@@ -143,25 +123,45 @@ async function stopRecording(): Promise<void> {
   const durationMs = Date.now() - startedAt;
 
   try {
-    // Stop media tracks first (official pattern), then finalize
-    mediaStream?.getTracks().forEach((t) => t.stop());
-
-    // Finalize flushes encoders, closes sources, writes moov atom
+    console.log("[offscreen] Finalizing output...");
     await output.finalize();
 
-    const buffer = bufferTarget?.buffer;
-    if (buffer && buffer.byteLength > 0) {
-      console.log(`[offscreen] MP4 finalized: ${buffer.byteLength} bytes, ${durationMs}ms`);
+    // Stop media tracks after finalize (mediabunny requirement)
+    mediaStream?.getTracks().forEach((t) => t.stop());
 
-      chrome.runtime.sendMessage({
-        type: MessageType.RECORDING_STOPPED,
-        chunks: [buffer],
-        mimeType: "video/mp4",
-        durationMs,
-      } satisfies ExtensionMessage).catch(console.error);
-    } else {
-      throw new Error("Recording produced no output data");
+    const buffer = bufferTarget?.buffer;
+    if (!buffer || buffer.byteLength === 0) {
+      throw new Error(`Recording produced no output data (buffer=${buffer?.byteLength ?? "null"} bytes)`);
     }
+
+    const mimeType = "video/quicktime";
+    const blob = new Blob([buffer], { type: mimeType });
+    console.log(`[offscreen] MOV finalized: ${blob.size} bytes, ${durationMs}ms`);
+
+    // Save directly to IndexedDB (shared with popup) to avoid
+    // ArrayBuffer serialization issues in Chrome extension messaging
+    const timestamp = new Date().toISOString().slice(0, 19).replace(/:/g, "-");
+    const sanitized = tabTitle.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/-+/g, "-").replace(/^-|-$/g, "").slice(0, 50) || "untitled";
+    const filename = `chromerec-${sanitized}-${timestamp}.mov`;
+
+    const recordingId = await saveRecording({
+      filename,
+      mimeType,
+      size: blob.size,
+      durationMs,
+      createdAt: Date.now(),
+      tabTitle,
+      blob,
+    });
+
+    console.log(`[offscreen] Saved to IndexedDB: id=${recordingId}, ${filename}`);
+
+    chrome.runtime.sendMessage({
+      type: MessageType.RECORDING_STOPPED,
+      recordingId,
+      mimeType,
+      durationMs,
+    } satisfies ExtensionMessage).catch(console.error);
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unknown error";
     console.error("[offscreen] Stop error:", err);
@@ -193,6 +193,7 @@ chrome.runtime.onMessage.addListener(
 
     switch (message.type) {
       case MessageType.STREAM_ID_READY:
+        tabTitle = message.tabTitle ?? "untitled";
         startRecording(message.streamId, message.config);
         return false;
 
@@ -210,4 +211,4 @@ chrome.runtime.onMessage.addListener(
   },
 );
 
-console.log("[offscreen] Document loaded (mediabunny MediaStream sources)");
+console.log("[offscreen] Document loaded (H.264 MOV, video only, saves to IndexedDB)");

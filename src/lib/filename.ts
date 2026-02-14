@@ -7,7 +7,9 @@ export function generateFilename(
 ): string {
   const sanitized = sanitizeTitle(tabTitle);
   const timestamp = date.toISOString().slice(0, 19).replace(/:/g, "-");
-  const ext = mimeType.startsWith("video/mp4") ? "mp4" : "webm";
+  const ext = mimeType === "video/quicktime" ? "mov"
+    : mimeType.startsWith("video/mp4") ? "mp4"
+    : "webm";
   return `chromerec-${sanitized}-${timestamp}.${ext}`;
 }
 
