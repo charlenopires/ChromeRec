@@ -16,7 +16,7 @@ import {
 } from "@/lib/db";
 import { generateFilename } from "@/lib/filename";
 import { formatDuration, formatSize, formatDate } from "@/lib/format";
-import fixWebmDuration from "fix-webm-duration";
+import fixWebmDuration from "webm-duration-fix";
 
 // --- State machine ---
 
@@ -442,8 +442,8 @@ export default function App() {
           const { chunks, mimeType, durationMs } = message;
           const rawBlob = new Blob(chunks, { type: mimeType });
 
-          // Fix WebM duration metadata (MediaRecorder leaves it as 0/unknown)
-          fixWebmDuration(rawBlob, durationMs, (fixedBlob: Blob) => {
+          // Fix WebM duration + add Cues for seeking (MediaRecorder omits both)
+          fixWebmDuration(rawBlob).then((fixedBlob) => {
             // Get tab title for filename
             chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
               const tabTitle = tabs[0]?.title ?? "untitled";
