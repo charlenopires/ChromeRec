@@ -5,10 +5,20 @@ export default defineManifest({
   name: "ChromeRec",
   description: "Record any Chrome tab with one click",
   version: "0.1.0",
+  icons: {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png",
+  },
   permissions: ["tabCapture", "offscreen", "storage", "activeTab"],
   action: {
     default_popup: "src/popup/index.html",
     default_title: "ChromeRec",
+    default_icon: {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+    },
   },
   background: {
     service_worker: "src/background/index.ts",
