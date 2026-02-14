@@ -1,6 +1,6 @@
-// Offscreen document: uses WebCodecs (H.264/AAC) + mediabunny muxer to produce
-// a proper MP4 file directly from the tab capture stream. This bypasses MediaRecorder
-// entirely, avoiding its fragmented MP4 / broken WebM duration issues.
+// Offscreen document: captures tab via getUserMedia, encodes to H.264/AAC,
+// and muxes to proper MP4 using mediabunny's MediaStream sources.
+// This produces a QuickTime-compatible MP4 with moov at the start.
 
 import {
   MessageType,
@@ -12,37 +12,19 @@ import {
   Output,
   Mp4OutputFormat,
   BufferTarget,
-  EncodedVideoPacketSource,
-  EncodedAudioPacketSource,
-  EncodedPacket,
+  MediaStreamVideoTrackSource,
+  MediaStreamAudioTrackSource,
 } from "mediabunny";
-
-// Chrome 94+ but lacks TS types
-declare class MediaStreamTrackProcessor {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  constructor(init: { track: any });
-  readonly readable: ReadableStream;
-}
 
 // --- State ---
 
 let mediaStream: MediaStream | null = null;
-let videoEncoder: VideoEncoder | null = null;
-let audioEncoder: AudioEncoder | null = null;
 let muxerOutput: Output<Mp4OutputFormat, BufferTarget> | null = null;
-let videoSource: EncodedVideoPacketSource | null = null;
-let audioSource: EncodedAudioPacketSource | null = null;
+let videoSource: MediaStreamVideoTrackSource | null = null;
+let audioSource: MediaStreamAudioTrackSource | null = null;
 let bufferTarget: BufferTarget | null = null;
 let startedAt = 0;
 let stopping = false;
-
-// Ordered async queues for encoder→muxer bridge (callbacks are sync, add() is async)
-let videoAddChain = Promise.resolve();
-let audioAddChain = Promise.resolve();
-
-// Resolve when frame/audio read loops complete
-let videoReadDone: Promise<void> = Promise.resolve();
-let audioReadDone: Promise<void> = Promise.resolve();
 
 // --- Stream acquisition ---
 
@@ -73,127 +55,47 @@ async function startRecording(
     const stream = await acquireStream(streamId);
     mediaStream = stream;
     stopping = false;
-    videoAddChain = Promise.resolve();
-    audioAddChain = Promise.resolve();
 
-    const videoTrack = stream.getVideoTracks()[0]!;
-    const audioTrack = stream.getAudioTracks()[0]!;
-    const vs = videoTrack.getSettings();
-    const as_ = audioTrack.getSettings();
+    const videoTrack = stream.getVideoTracks()[0];
+    const audioTrack = stream.getAudioTracks()[0];
+    if (!videoTrack) throw new Error("No video track available");
 
-    const width = vs.width ?? 1920;
-    const height = vs.height ?? 1080;
-    const sampleRate = as_.sampleRate ?? 48000;
-    const channelCount = as_.channelCount ?? 2;
+    // mediabunny sources handle WebCodecs encoding + timestamp sync internally
+    videoSource = new MediaStreamVideoTrackSource(
+      videoTrack as MediaStreamVideoTrack,
+      { codec: "avc", bitrate: config.videoBitsPerSecond },
+    );
 
-    // --- Check WebCodecs support ---
-    const videoConfig: VideoEncoderConfig = {
-      codec: "avc1.42001f", // Baseline Profile, Level 3.1
-      width,
-      height,
-      bitrate: config.videoBitsPerSecond,
-      framerate: config.fps,
-    };
-    const { supported: videoOk } = await VideoEncoder.isConfigSupported(videoConfig);
-    if (!videoOk) throw new Error("H.264 encoding not supported on this device");
+    videoSource.errorPromise.catch((err) =>
+      console.error("[offscreen] Video source error:", err),
+    );
 
-    const audioConfig: AudioEncoderConfig = {
-      codec: "mp4a.40.2", // AAC-LC
-      numberOfChannels: channelCount,
-      sampleRate,
-      bitrate: 128_000,
-    };
-    const { supported: audioOk } = await AudioEncoder.isConfigSupported(audioConfig);
-    if (!audioOk) throw new Error("AAC encoding not supported on this device");
+    if (audioTrack) {
+      audioSource = new MediaStreamAudioTrackSource(
+        audioTrack as MediaStreamAudioTrack,
+        { codec: "aac", bitrate: 128_000 },
+      );
 
-    // --- Mediabunny muxer ---
+      audioSource.errorPromise.catch((err) =>
+        console.error("[offscreen] Audio source error:", err),
+      );
+    }
+
+    // Setup muxer — moov at start for QuickTime compatibility
     bufferTarget = new BufferTarget();
     muxerOutput = new Output({
       format: new Mp4OutputFormat({ fastStart: "in-memory" }),
       target: bufferTarget,
     });
 
-    videoSource = new EncodedVideoPacketSource("avc");
-    muxerOutput.addVideoTrack(videoSource, { frameRate: config.fps });
+    muxerOutput.addVideoTrack(videoSource);
+    if (audioSource) muxerOutput.addAudioTrack(audioSource);
 
-    audioSource = new EncodedAudioPacketSource("aac");
-    muxerOutput.addAudioTrack(audioSource);
-
+    // Frames are captured automatically once started
     await muxerOutput.start();
 
-    // --- WebCodecs encoders ---
-    videoEncoder = new VideoEncoder({
-      output: (chunk, metadata) => {
-        videoAddChain = videoAddChain.then(() =>
-          videoSource!.add(
-            EncodedPacket.fromEncodedChunk(chunk),
-            metadata ?? undefined,
-          ),
-        );
-      },
-      error: (e) => console.error("[offscreen] VideoEncoder error:", e),
-    });
-    videoEncoder.configure(videoConfig);
-
-    audioEncoder = new AudioEncoder({
-      output: (chunk, metadata) => {
-        audioAddChain = audioAddChain.then(() =>
-          audioSource!.add(
-            EncodedPacket.fromEncodedChunk(chunk),
-            metadata ?? undefined,
-          ),
-        );
-      },
-      error: (e) => console.error("[offscreen] AudioEncoder error:", e),
-    });
-    audioEncoder.configure(audioConfig);
-
-    // --- Frame/audio processing loops ---
-    let frameCount = 0;
-
-    videoReadDone = (async () => {
-      const reader = new MediaStreamTrackProcessor({ track: videoTrack })
-        .readable.getReader();
-      try {
-        while (true) {
-          const { value: frame, done } = await reader.read();
-          if (done || !frame || stopping) {
-            frame?.close();
-            break;
-          }
-          if (videoEncoder!.encodeQueueSize <= 5) {
-            const keyFrame = frameCount % 150 === 0;
-            videoEncoder!.encode(frame, { keyFrame });
-            frameCount++;
-          }
-          frame.close();
-        }
-      } catch (e) {
-        if (!stopping) console.error("[offscreen] Video read error:", e);
-      }
-    })();
-
-    audioReadDone = (async () => {
-      const reader = new MediaStreamTrackProcessor({ track: audioTrack })
-        .readable.getReader();
-      try {
-        while (true) {
-          const { value: data, done } = await reader.read();
-          if (done || !data || stopping) {
-            data?.close();
-            break;
-          }
-          if (audioEncoder!.encodeQueueSize <= 5) {
-            audioEncoder!.encode(data);
-          }
-          data.close();
-        }
-      } catch (e) {
-        if (!stopping) console.error("[offscreen] Audio read error:", e);
-      }
-    })();
-
     startedAt = Date.now();
+    const vs = videoTrack.getSettings();
 
     chrome.runtime.sendMessage({
       type: MessageType.RECORDING_STARTED,
@@ -201,7 +103,7 @@ async function startRecording(
     } satisfies ExtensionMessage).catch(console.error);
 
     console.log(
-      `[offscreen] Recording started: H.264/AAC, ${width}x${height}, ${config.videoBitsPerSecond / 1_000_000} Mbps`,
+      `[offscreen] Recording started: H.264/AAC, ${vs.width}x${vs.height}, ${config.videoBitsPerSecond / 1_000_000} Mbps`,
     );
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unknown error";
@@ -218,29 +120,21 @@ async function startRecording(
 }
 
 async function stopRecording(): Promise<void> {
-  if (stopping || !mediaStream) return;
+  if (stopping || !muxerOutput) return;
   stopping = true;
 
   const durationMs = Date.now() - startedAt;
 
   try {
-    // Stop media tracks — readable streams will end
-    mediaStream.getTracks().forEach((t) => t.stop());
-
-    // Wait for read loops to drain
-    await Promise.all([videoReadDone, audioReadDone]);
-
-    // Flush remaining frames through encoders
-    await videoEncoder?.flush();
-    await audioEncoder?.flush();
-
-    // Wait for all pending muxer writes
-    await Promise.all([videoAddChain, audioAddChain]);
-
-    // Close sources and finalize MP4
+    // Close sources (stops frame capture, flushes encoders)
     videoSource?.close();
     audioSource?.close();
-    await muxerOutput?.finalize();
+
+    // Finalize MP4 (writes moov atom at start)
+    await muxerOutput.finalize();
+
+    // Stop media tracks
+    mediaStream?.getTracks().forEach((t) => t.stop());
 
     const buffer = bufferTarget?.buffer;
     if (buffer && buffer.byteLength > 0) {
@@ -270,22 +164,14 @@ async function stopRecording(): Promise<void> {
 }
 
 function cleanup(): void {
-  if (mediaStream) {
-    mediaStream.getTracks().forEach((t) => t.stop());
-    mediaStream = null;
-  }
-  videoEncoder = null;
-  audioEncoder = null;
+  mediaStream?.getTracks().forEach((t) => t.stop());
+  mediaStream = null;
   muxerOutput = null;
   videoSource = null;
   audioSource = null;
   bufferTarget = null;
   startedAt = 0;
   stopping = false;
-  videoAddChain = Promise.resolve();
-  audioAddChain = Promise.resolve();
-  videoReadDone = Promise.resolve();
-  audioReadDone = Promise.resolve();
 }
 
 // --- Message listener ---
@@ -313,4 +199,4 @@ chrome.runtime.onMessage.addListener(
   },
 );
 
-console.log("[offscreen] Document loaded (WebCodecs + mediabunny muxer)");
+console.log("[offscreen] Document loaded (mediabunny MediaStream sources)");
