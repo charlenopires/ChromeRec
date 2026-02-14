@@ -1,6 +1,6 @@
 // Offscreen document: captures tab via getUserMedia, encodes to H.264/AAC,
 // and muxes to proper MP4 using mediabunny's MediaStream sources.
-// This produces a QuickTime-compatible MP4 with moov at the start.
+// Follows the official mediabunny live-recording example pattern.
 
 import {
   MessageType,
@@ -14,14 +14,14 @@ import {
   BufferTarget,
   MediaStreamVideoTrackSource,
   MediaStreamAudioTrackSource,
+  canEncodeVideo,
+  canEncodeAudio,
 } from "mediabunny";
 
 // --- State ---
 
 let mediaStream: MediaStream | null = null;
-let muxerOutput: Output<Mp4OutputFormat, BufferTarget> | null = null;
-let videoSource: MediaStreamVideoTrackSource | null = null;
-let audioSource: MediaStreamAudioTrackSource | null = null;
+let output: Output<Mp4OutputFormat, BufferTarget> | null = null;
 let bufferTarget: BufferTarget | null = null;
 let startedAt = 0;
 let stopping = false;
@@ -60,42 +60,59 @@ async function startRecording(
     const audioTrack = stream.getAudioTracks()[0];
     if (!videoTrack) throw new Error("No video track available");
 
-    // mediabunny sources handle WebCodecs encoding + timestamp sync internally
-    videoSource = new MediaStreamVideoTrackSource(
-      videoTrack as MediaStreamVideoTrack,
-      { codec: "avc", bitrate: config.videoBitsPerSecond },
-    );
+    const vs = videoTrack.getSettings();
+    const width = vs.width ?? 1920;
+    const height = vs.height ?? 1080;
 
-    videoSource.errorPromise.catch((err) =>
-      console.error("[offscreen] Video source error:", err),
-    );
+    // Check codec support before creating sources
+    const videoOk = await canEncodeVideo("avc", {
+      width,
+      height,
+      bitrate: config.videoBitsPerSecond,
+    });
+    if (!videoOk) throw new Error("H.264 video encoding not supported");
 
-    if (audioTrack) {
-      audioSource = new MediaStreamAudioTrackSource(
-        audioTrack as MediaStreamAudioTrack,
-        { codec: "aac", bitrate: 128_000 },
-      );
+    const audioOk = audioTrack
+      ? await canEncodeAudio("aac", { bitrate: 128_000 })
+      : false;
 
-      audioSource.errorPromise.catch((err) =>
-        console.error("[offscreen] Audio source error:", err),
-      );
-    }
+    console.log(`[offscreen] Codec support: video=avc(${videoOk}), audio=aac(${audioOk})`);
 
     // Setup muxer — moov at start for QuickTime compatibility
     bufferTarget = new BufferTarget();
-    muxerOutput = new Output({
+    output = new Output({
       format: new Mp4OutputFormat({ fastStart: "in-memory" }),
       target: bufferTarget,
     });
 
-    muxerOutput.addVideoTrack(videoSource);
-    if (audioSource) muxerOutput.addAudioTrack(audioSource);
+    // Video source (H.264)
+    const videoSource = new MediaStreamVideoTrackSource(
+      videoTrack as MediaStreamVideoTrack,
+      { codec: "avc", bitrate: config.videoBitsPerSecond },
+    );
+    videoSource.errorPromise.catch((err) => {
+      console.error("[offscreen] Video source error:", err);
+    });
+    output.addVideoTrack(videoSource, { frameRate: config.fps });
 
-    // Frames are captured automatically once started
-    await muxerOutput.start();
+    // Audio source (AAC if supported, opus as fallback)
+    if (audioTrack) {
+      const audioCodec = audioOk ? "aac" : "opus";
+      const audioSource = new MediaStreamAudioTrackSource(
+        audioTrack as MediaStreamAudioTrack,
+        { codec: audioCodec, bitrate: 128_000 },
+      );
+      audioSource.errorPromise.catch((err) => {
+        console.error("[offscreen] Audio source error:", err);
+      });
+      output.addAudioTrack(audioSource);
+      console.log(`[offscreen] Audio codec: ${audioCodec}`);
+    }
+
+    // Start — frames are captured automatically
+    await output.start();
 
     startedAt = Date.now();
-    const vs = videoTrack.getSettings();
 
     chrome.runtime.sendMessage({
       type: MessageType.RECORDING_STARTED,
@@ -103,7 +120,7 @@ async function startRecording(
     } satisfies ExtensionMessage).catch(console.error);
 
     console.log(
-      `[offscreen] Recording started: H.264/AAC, ${vs.width}x${vs.height}, ${config.videoBitsPerSecond / 1_000_000} Mbps`,
+      `[offscreen] Recording started: H.264/${audioOk ? "AAC" : "Opus"}, ${width}x${height}, ${config.videoBitsPerSecond / 1_000_000} Mbps`,
     );
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unknown error";
@@ -120,21 +137,17 @@ async function startRecording(
 }
 
 async function stopRecording(): Promise<void> {
-  if (stopping || !muxerOutput) return;
+  if (stopping || !output) return;
   stopping = true;
 
   const durationMs = Date.now() - startedAt;
 
   try {
-    // Close sources (stops frame capture, flushes encoders)
-    videoSource?.close();
-    audioSource?.close();
-
-    // Finalize MP4 (writes moov atom at start)
-    await muxerOutput.finalize();
-
-    // Stop media tracks
+    // Stop media tracks first (official pattern), then finalize
     mediaStream?.getTracks().forEach((t) => t.stop());
+
+    // Finalize flushes encoders, closes sources, writes moov atom
+    await output.finalize();
 
     const buffer = bufferTarget?.buffer;
     if (buffer && buffer.byteLength > 0) {
@@ -166,9 +179,7 @@ async function stopRecording(): Promise<void> {
 function cleanup(): void {
   mediaStream?.getTracks().forEach((t) => t.stop());
   mediaStream = null;
-  muxerOutput = null;
-  videoSource = null;
-  audioSource = null;
+  output = null;
   bufferTarget = null;
   startedAt = 0;
   stopping = false;
