@@ -16,6 +16,7 @@ import {
 } from "@/lib/db";
 import { generateFilename } from "@/lib/filename";
 import { formatDuration, formatSize, formatDate } from "@/lib/format";
+import fixWebmDuration from "fix-webm-duration";
 
 // --- State machine ---
 
@@ -439,29 +440,32 @@ export default function App() {
 
         case MessageType.RECORDING_STOPPED: {
           const { chunks, mimeType, durationMs } = message;
-          const blob = new Blob(chunks, { type: mimeType });
+          const rawBlob = new Blob(chunks, { type: mimeType });
 
-          // Get tab title for filename
-          chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-            const tabTitle = tabs[0]?.title ?? "untitled";
-            const filename = generateFilename(tabTitle);
+          // Fix WebM duration metadata (MediaRecorder leaves it as 0/unknown)
+          fixWebmDuration(rawBlob, durationMs, (fixedBlob: Blob) => {
+            // Get tab title for filename
+            chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+              const tabTitle = tabs[0]?.title ?? "untitled";
+              const filename = generateFilename(tabTitle);
 
-            saveRecording({
-              filename,
-              mimeType,
-              size: blob.size,
-              durationMs,
-              createdAt: Date.now(),
-              tabTitle,
-              blob,
-            }).then((id) => {
-              setState((prev) => ({
-                ...prev,
-                phase: "completed",
-                lastSavedId: id,
+              saveRecording({
+                filename,
+                mimeType,
+                size: fixedBlob.size,
                 durationMs,
-              }));
-              refreshData();
+                createdAt: Date.now(),
+                tabTitle,
+                blob: fixedBlob,
+              }).then((id) => {
+                setState((prev) => ({
+                  ...prev,
+                  phase: "completed",
+                  lastSavedId: id,
+                  durationMs,
+                }));
+                refreshData();
+              });
             });
           });
           break;
