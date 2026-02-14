@@ -17,6 +17,15 @@ import {
 import { generateFilename } from "@/lib/filename";
 import { formatDuration, formatSize, formatDate } from "@/lib/format";
 import fixWebmDuration from "fix-webm-duration";
+import {
+  Input,
+  Output,
+  Conversion,
+  BlobSource,
+  Mp4OutputFormat,
+  BufferTarget,
+  ALL_FORMATS,
+} from "mediabunny";
 
 // --- State machine ---
 
@@ -487,10 +496,32 @@ export default function App() {
             });
           };
 
-          // MP4 files have correct duration natively — save directly.
-          // WebM files need post-processing to fix missing duration metadata.
+          // MP4: remux fMP4 → regular MP4 (moov at start) for QuickTime compat.
+          // WebM: fix missing duration metadata in EBML header.
           if (mimeType.startsWith("video/mp4")) {
-            saveFinalBlob(rawBlob);
+            (async () => {
+              try {
+                const input = new Input({
+                  source: new BlobSource(rawBlob),
+                  formats: ALL_FORMATS,
+                });
+                const target = new BufferTarget();
+                const output = new Output({
+                  format: new Mp4OutputFormat({ fastStart: "in-memory" }),
+                  target,
+                });
+                const conversion = await Conversion.init({ input, output });
+                await conversion.execute();
+                const buf = target.buffer;
+                if (!buf) throw new Error("Remux produced no output");
+                const fixedBlob = new Blob([buf], { type: "video/mp4" });
+                console.log(`[popup] Remuxed fMP4 → MP4: ${fixedBlob.size} bytes`);
+                saveFinalBlob(fixedBlob);
+              } catch (err) {
+                console.warn("[popup] fMP4 remux failed, saving raw:", err);
+                saveFinalBlob(rawBlob);
+              }
+            })();
           } else {
             fixWebmDuration(rawBlob, durationMs)
               .then(saveFinalBlob)
