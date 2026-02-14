@@ -14,6 +14,7 @@ export default defineConfig({
   build: {
     outDir: "dist",
     emptyOutDir: true,
+    chunkSizeWarningLimit: 600,
     rollupOptions: {
       input: {
         offscreen: resolve(__dirname, "src/offscreen/index.html"),

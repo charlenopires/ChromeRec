@@ -17,15 +17,6 @@ import {
 import { generateFilename } from "@/lib/filename";
 import { formatDuration, formatSize, formatDate } from "@/lib/format";
 import fixWebmDuration from "fix-webm-duration";
-import {
-  Input,
-  Output,
-  Conversion,
-  BlobSource,
-  Mp4OutputFormat,
-  BufferTarget,
-  ALL_FORMATS,
-} from "mediabunny";
 
 // --- State machine ---
 
@@ -502,6 +493,10 @@ export default function App() {
           (async () => {
             try {
               console.log("[popup] Transcoding to MP4...");
+              const {
+                Input, Output, Conversion, BlobSource,
+                Mp4OutputFormat, BufferTarget, ALL_FORMATS,
+              } = await import("mediabunny");
               const input = new Input({
                 source: new BlobSource(rawBlob),
                 formats: ALL_FORMATS,
