@@ -440,11 +440,22 @@ export default function App() {
 
         case MessageType.RECORDING_STOPPED: {
           const { chunks, mimeType, durationMs } = message;
-          const rawBlob = new Blob(chunks, { type: mimeType });
+          console.log(`[popup] Recording stopped: ${chunks.length} chunks, ${durationMs}ms, mime: ${mimeType}`);
 
-          // Fix WebM duration + add Cues for seeking (MediaRecorder omits both).
-          // Falls back to raw blob if the fix fails.
-          const saveBlob = (blob: Blob) => {
+          const rawBlob = new Blob(chunks, { type: mimeType });
+          console.log(`[popup] Raw blob: ${rawBlob.size} bytes`);
+
+          if (rawBlob.size === 0) {
+            setState((prev) => ({
+              ...prev,
+              phase: "error",
+              errorMessage: "Recording produced no data",
+            }));
+            break;
+          }
+
+          const saveBlob = (blob: Blob, label: string) => {
+            console.log(`[popup] Saving ${label}: ${blob.size} bytes`);
             chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
               const tabTitle = tabs[0]?.title ?? "untitled";
               const filename = generateFilename(tabTitle);
@@ -458,6 +469,7 @@ export default function App() {
                 tabTitle,
                 blob,
               }).then((id) => {
+                console.log(`[popup] Saved recording id=${id}`);
                 setState((prev) => ({
                   ...prev,
                   phase: "completed",
@@ -476,11 +488,15 @@ export default function App() {
             });
           };
 
-          fixWebmDuration(rawBlob, durationMs, { logger: false })
-            .then(saveBlob)
+          // fix-webm-duration: patches Duration in EBML header.
+          // Its internal try/catch returns original blob on any parse error.
+          fixWebmDuration(rawBlob, durationMs)
+            .then((fixedBlob) => {
+              saveBlob(fixedBlob, fixedBlob === rawBlob ? "raw (fix skipped)" : "fixed");
+            })
             .catch((err) => {
-              console.warn("[popup] WebM duration fix failed, saving raw blob:", err);
-              saveBlob(rawBlob);
+              console.warn("[popup] Duration fix rejected:", err);
+              saveBlob(rawBlob, "raw (fix failed)");
             });
           break;
         }
