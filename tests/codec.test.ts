@@ -14,40 +14,9 @@ beforeEach(() => {
 });
 
 describe("negotiateCodec", () => {
-  // --- MP4 codecs (preferred) ---
+  // --- WebM codecs (preferred for recording) ---
 
-  test("selects H.264 + AAC when supported", () => {
-    mockIsTypeSupported.mockImplementation(
-      (type: string) => type === "video/mp4;codecs=avc1,mp4a.40.2",
-    );
-    const result = negotiateCodec();
-    expect(result.mimeType).toBe("video/mp4;codecs=avc1,mp4a.40.2");
-    expect(result.label).toBe("H.264 + AAC");
-    expect(result.hasAudioCodec).toBe(true);
-  });
-
-  test("falls back to plain MP4", () => {
-    mockIsTypeSupported.mockImplementation(
-      (type: string) => type === "video/mp4",
-    );
-    const result = negotiateCodec();
-    expect(result.mimeType).toBe("video/mp4");
-    expect(result.label).toBe("MP4 (default)");
-  });
-
-  test("prefers MP4 over WebM when both supported", () => {
-    mockIsTypeSupported.mockImplementation(
-      (type: string) =>
-        type === "video/mp4;codecs=avc1,mp4a.40.2" ||
-        type === "video/webm;codecs=vp9,opus",
-    );
-    const result = negotiateCodec();
-    expect(result.mimeType).toBe("video/mp4;codecs=avc1,mp4a.40.2");
-  });
-
-  // --- WebM codecs (fallback) ---
-
-  test("selects VP9 + Opus when MP4 unsupported", () => {
+  test("selects VP9 + Opus when supported", () => {
     mockIsTypeSupported.mockImplementation(
       (type: string) => type === "video/webm;codecs=vp9,opus",
     );
@@ -89,6 +58,37 @@ describe("negotiateCodec", () => {
     const result = negotiateCodec();
     expect(result.mimeType).toBe("video/webm");
     expect(result.label).toBe("WebM (default)");
+  });
+
+  test("prefers WebM over MP4 when both supported", () => {
+    mockIsTypeSupported.mockImplementation(
+      (type: string) =>
+        type === "video/mp4;codecs=avc1,mp4a.40.2" ||
+        type === "video/webm;codecs=vp9,opus",
+    );
+    const result = negotiateCodec();
+    expect(result.mimeType).toBe("video/webm;codecs=vp9,opus");
+  });
+
+  // --- MP4 codecs (last resort) ---
+
+  test("selects H.264 + AAC when WebM unsupported", () => {
+    mockIsTypeSupported.mockImplementation(
+      (type: string) => type === "video/mp4;codecs=avc1,mp4a.40.2",
+    );
+    const result = negotiateCodec();
+    expect(result.mimeType).toBe("video/mp4;codecs=avc1,mp4a.40.2");
+    expect(result.label).toBe("H.264 + AAC");
+    expect(result.hasAudioCodec).toBe(true);
+  });
+
+  test("falls back to plain MP4", () => {
+    mockIsTypeSupported.mockImplementation(
+      (type: string) => type === "video/mp4",
+    );
+    const result = negotiateCodec();
+    expect(result.mimeType).toBe("video/mp4");
+    expect(result.label).toBe("MP4 (default)");
   });
 
   test("throws when no codec is supported", () => {

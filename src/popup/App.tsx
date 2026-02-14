@@ -463,14 +463,14 @@ export default function App() {
             break;
           }
 
-          const saveFinalBlob = (blob: Blob) => {
+          const saveFinal = (blob: Blob, finalMime: string) => {
             chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
               const tabTitle = tabs[0]?.title ?? "untitled";
-              const filename = generateFilename(tabTitle, mimeType);
+              const filename = generateFilename(tabTitle, finalMime);
 
               saveRecording({
                 filename,
-                mimeType,
+                mimeType: finalMime,
                 size: blob.size,
                 durationMs,
                 createdAt: Date.now(),
@@ -496,37 +496,47 @@ export default function App() {
             });
           };
 
-          // MP4: remux fMP4 → regular MP4 (moov at start) for QuickTime compat.
-          // WebM: fix missing duration metadata in EBML header.
-          if (mimeType.startsWith("video/mp4")) {
-            (async () => {
-              try {
-                const input = new Input({
-                  source: new BlobSource(rawBlob),
-                  formats: ALL_FORMATS,
-                });
-                const target = new BufferTarget();
-                const output = new Output({
-                  format: new Mp4OutputFormat({ fastStart: "in-memory" }),
-                  target,
-                });
-                const conversion = await Conversion.init({ input, output });
-                await conversion.execute();
-                const buf = target.buffer;
-                if (!buf) throw new Error("Remux produced no output");
-                const fixedBlob = new Blob([buf], { type: "video/mp4" });
-                console.log(`[popup] Remuxed fMP4 → MP4: ${fixedBlob.size} bytes`);
-                saveFinalBlob(fixedBlob);
-              } catch (err) {
-                console.warn("[popup] fMP4 remux failed, saving raw:", err);
-                saveFinalBlob(rawBlob);
+          // Transcode to proper MP4 (H.264/AAC) for QuickTime/VLC compatibility.
+          // Chrome records as WebM; mediabunny uses WebCodecs to transcode.
+          // Fallback: save as WebM with duration fix if transcoding fails.
+          (async () => {
+            try {
+              console.log("[popup] Transcoding to MP4...");
+              const input = new Input({
+                source: new BlobSource(rawBlob),
+                formats: ALL_FORMATS,
+              });
+              const target = new BufferTarget();
+              const output = new Output({
+                format: new Mp4OutputFormat({ fastStart: "in-memory" }),
+                target,
+              });
+              const conversion = await Conversion.init({
+                input,
+                output,
+                video: { codec: "avc" },
+                audio: { codec: "aac" },
+              });
+              if (!conversion.isValid) {
+                console.warn("[popup] Conversion invalid:", conversion.discardedTracks);
+                throw new Error("Conversion invalid");
               }
-            })();
-          } else {
-            fixWebmDuration(rawBlob, durationMs)
-              .then(saveFinalBlob)
-              .catch(() => saveFinalBlob(rawBlob));
-          }
+              await conversion.execute();
+              const buf = target.buffer;
+              if (!buf) throw new Error("Conversion produced no output");
+              const mp4Blob = new Blob([buf], { type: "video/mp4" });
+              console.log(`[popup] Transcoded to MP4: ${mp4Blob.size} bytes`);
+              saveFinal(mp4Blob, "video/mp4");
+            } catch (err) {
+              console.warn("[popup] MP4 transcode failed, saving as WebM:", err);
+              try {
+                const fixed = await fixWebmDuration(rawBlob, durationMs);
+                saveFinal(fixed, mimeType);
+              } catch {
+                saveFinal(rawBlob, mimeType);
+              }
+            }
+          })();
           break;
         }
 
