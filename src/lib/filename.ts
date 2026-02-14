@@ -1,9 +1,14 @@
-// Auto-generate download filenames from tab title and timestamp.
+// Auto-generate download filenames from tab title, mime type, and timestamp.
 
-export function generateFilename(tabTitle: string, date: Date = new Date()): string {
+export function generateFilename(
+  tabTitle: string,
+  mimeType: string = "video/webm",
+  date: Date = new Date(),
+): string {
   const sanitized = sanitizeTitle(tabTitle);
   const timestamp = date.toISOString().slice(0, 19).replace(/:/g, "-");
-  return `chromerec-${sanitized}-${timestamp}.webm`;
+  const ext = mimeType.startsWith("video/mp4") ? "mp4" : "webm";
+  return `chromerec-${sanitized}-${timestamp}.${ext}`;
 }
 
 export function sanitizeTitle(title: string): string {

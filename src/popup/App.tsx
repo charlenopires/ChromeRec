@@ -454,11 +454,10 @@ export default function App() {
             break;
           }
 
-          const saveBlob = (blob: Blob, label: string) => {
-            console.log(`[popup] Saving ${label}: ${blob.size} bytes`);
+          const saveFinalBlob = (blob: Blob) => {
             chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
               const tabTitle = tabs[0]?.title ?? "untitled";
-              const filename = generateFilename(tabTitle);
+              const filename = generateFilename(tabTitle, mimeType);
 
               saveRecording({
                 filename,
@@ -469,7 +468,7 @@ export default function App() {
                 tabTitle,
                 blob,
               }).then((id) => {
-                console.log(`[popup] Saved recording id=${id}`);
+                console.log(`[popup] Saved recording id=${id}, file=${filename}`);
                 setState((prev) => ({
                   ...prev,
                   phase: "completed",
@@ -488,16 +487,15 @@ export default function App() {
             });
           };
 
-          // fix-webm-duration: patches Duration in EBML header.
-          // Its internal try/catch returns original blob on any parse error.
-          fixWebmDuration(rawBlob, durationMs)
-            .then((fixedBlob) => {
-              saveBlob(fixedBlob, fixedBlob === rawBlob ? "raw (fix skipped)" : "fixed");
-            })
-            .catch((err) => {
-              console.warn("[popup] Duration fix rejected:", err);
-              saveBlob(rawBlob, "raw (fix failed)");
-            });
+          // MP4 files have correct duration natively — save directly.
+          // WebM files need post-processing to fix missing duration metadata.
+          if (mimeType.startsWith("video/mp4")) {
+            saveFinalBlob(rawBlob);
+          } else {
+            fixWebmDuration(rawBlob, durationMs)
+              .then(saveFinalBlob)
+              .catch(() => saveFinalBlob(rawBlob));
+          }
           break;
         }
 
